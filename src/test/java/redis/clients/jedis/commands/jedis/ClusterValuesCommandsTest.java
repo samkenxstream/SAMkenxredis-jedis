@@ -1,19 +1,28 @@
 package redis.clients.jedis.commands.jedis;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.fail;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.junit.Test;
 
+import redis.clients.jedis.BuilderFactory;
+import redis.clients.jedis.CommandArguments;
+import redis.clients.jedis.CommandObject;
 import redis.clients.jedis.GeoCoordinate;
 import redis.clients.jedis.JedisPubSub;
+import redis.clients.jedis.Protocol;
+import redis.clients.jedis.ScanRoundRobin;
 import redis.clients.jedis.args.GeoUnit;
 import redis.clients.jedis.params.GeoRadiusParam;
 import redis.clients.jedis.params.GeoRadiusStoreParam;
+import redis.clients.jedis.resps.ScanResult;
 
 public class ClusterValuesCommandsTest extends ClusterJedisCommandsTestBase {
 
@@ -105,5 +114,49 @@ public class ClusterValuesCommandsTest extends ClusterJedisCommandsTestBase {
         assertEquals(0, subscribedChannels);
       }
     }, "foo");
+  }
+
+  @Test
+  public void rawPingBroadcast() {
+    String reply = cluster.broadcastCommand(
+        new CommandObject<>(new CommandArguments(Protocol.Command.PING), BuilderFactory.STRING));
+    assertEquals("PONG", reply);
+  }
+
+  @Test
+  public void pingBroadcast() {
+    assertEquals("PONG", cluster.ping());
+  }
+
+  @Test
+  public void flushAllBroadcast() {
+    assertNull(cluster.get("foo"));
+    assertEquals("OK", cluster.set("foo", "bar"));
+    assertEquals("bar", cluster.get("foo"));
+    cluster.flushAll();
+    assertNull(cluster.get("foo"));
+  }
+
+  @Test
+  public void scanRoundRobin() {
+    Set<String> allIn = new HashSet<>(26 * 26);
+    char[] arr = new char[2];
+    for (int i = 0; i < 26; i++) {
+      arr[0] = (char) ('a' + i);
+      for (int j = 0; j < 26; j++) {
+        arr[1] = (char) ('a' + j);
+        String str = new String(arr);
+        cluster.incr(str);
+        allIn.add(str);
+      }
+    }
+
+    Set<String> allScan = new HashSet<>();
+    ScanRoundRobin scan = cluster.scan(10, "*");
+    while (!scan.isRoundRobinCompleted()) {
+      ScanResult<String> batch = scan.get();
+      allScan.addAll(batch.getResult());
+    }
+    assertEquals(allIn, allScan);
   }
 }

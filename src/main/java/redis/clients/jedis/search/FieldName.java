@@ -16,7 +16,7 @@ public class FieldName implements IParams {
   private String attribute;
 
   public FieldName(String name) {
-    this(name, null);
+    this.name = name;
   }
 
   public FieldName(String name, String attribute) {
@@ -25,6 +25,12 @@ public class FieldName implements IParams {
   }
 
   public FieldName as(String attribute) {
+    if (attribute == null) {
+      throw new IllegalArgumentException("Setting null as field attribute is not allowed.");
+    }
+    if (this.attribute != null) {
+      throw new IllegalStateException("Attribute for this field is already set.");
+    }
     this.attribute = attribute;
     return this;
   }

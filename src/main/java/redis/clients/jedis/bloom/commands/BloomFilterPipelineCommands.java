@@ -1,8 +1,10 @@
-package redis.clients.jedis.bloom;
+package redis.clients.jedis.bloom.commands;
 
 import java.util.List;
 import java.util.Map;
 import redis.clients.jedis.Response;
+import redis.clients.jedis.bloom.BFInsertParams;
+import redis.clients.jedis.bloom.BFReserveParams;
 
 public interface BloomFilterPipelineCommands {
 
@@ -25,6 +27,8 @@ public interface BloomFilterPipelineCommands {
   Response<Map.Entry<Long, byte[]>> bfScanDump(String key, long iterator);
 
   Response<String> bfLoadChunk(String key, long iterator, byte[] data);
+
+  Response<Long> bfCard(String key);
 
   Response<Map<String, Object>> bfInfo(String key);
 }

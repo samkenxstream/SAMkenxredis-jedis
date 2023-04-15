@@ -1,61 +1,78 @@
 package redis.clients.jedis;
 
 import java.io.Closeable;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
 import org.json.JSONArray;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import redis.clients.jedis.args.*;
-import redis.clients.jedis.bloom.BFInsertParams;
-import redis.clients.jedis.bloom.BFReserveParams;
-import redis.clients.jedis.bloom.CFInsertParams;
-import redis.clients.jedis.bloom.CFReserveParams;
+import redis.clients.jedis.bloom.*;
 import redis.clients.jedis.commands.PipelineBinaryCommands;
 import redis.clients.jedis.commands.PipelineCommands;
 import redis.clients.jedis.commands.RedisModulePipelineCommands;
+import redis.clients.jedis.exceptions.JedisConnectionException;
 import redis.clients.jedis.graph.GraphCommandObjects;
 import redis.clients.jedis.graph.ResultSet;
 import redis.clients.jedis.json.JsonSetParams;
 import redis.clients.jedis.json.Path;
 import redis.clients.jedis.json.Path2;
+import redis.clients.jedis.json.JsonObjectMapper;
 import redis.clients.jedis.params.*;
 import redis.clients.jedis.providers.ConnectionProvider;
 import redis.clients.jedis.resps.*;
-import redis.clients.jedis.search.IndexOptions;
-import redis.clients.jedis.search.Query;
-import redis.clients.jedis.search.Schema;
-import redis.clients.jedis.search.SearchResult;
+import redis.clients.jedis.search.*;
 import redis.clients.jedis.search.aggr.AggregationBuilder;
 import redis.clients.jedis.search.aggr.AggregationResult;
+import redis.clients.jedis.search.schemafields.SchemaField;
 import redis.clients.jedis.timeseries.*;
+import redis.clients.jedis.util.IOUtils;
 import redis.clients.jedis.util.KeyValue;
 
 public abstract class MultiNodePipelineBase implements PipelineCommands, PipelineBinaryCommands,
     RedisModulePipelineCommands, Closeable {
 
+  private final Logger log = LoggerFactory.getLogger(getClass());
+
+  /**
+   * The number of processes for {@code sync()}. If you have enough cores for client (and you have
+   * more than 3 cluster nodes), you may increase this number of workers.
+   * Suggestion:&nbsp;&le;&nbsp;cluster&nbsp;nodes.
+   */
+  public static volatile int MULTI_NODE_PIPELINE_SYNC_WORKERS = 3;
+
   private final Map<HostAndPort, Queue<Response<?>>> pipelinedResponses;
   private final Map<HostAndPort, Connection> connections;
-  private volatile boolean synced;
+  private volatile boolean syncing = false;
 
   private final CommandObjects commandObjects;
   private GraphCommandObjects graphCommandObjects;
 
+  private final ExecutorService executorService = Executors.newFixedThreadPool(MULTI_NODE_PIPELINE_SYNC_WORKERS);
+
   public MultiNodePipelineBase(CommandObjects commandObjects) {
     pipelinedResponses = new LinkedHashMap<>();
     connections = new LinkedHashMap<>();
-    synced = false;
     this.commandObjects = commandObjects;
   }
 
   /**
    * Sub-classes must call this method, if graph commands are going to be used.
+   * @param connectionProvider connection provider
    */
   protected final void prepareGraphCommands(ConnectionProvider connectionProvider) {
     this.graphCommandObjects = new GraphCommandObjects(connectionProvider);
+    this.graphCommandObjects.setBaseCommandArgumentsCreator((comm) -> this.commandObjects.commandArguments(comm));
   }
 
   protected abstract HostAndPort getNodeKey(CommandArguments args);
@@ -71,10 +88,16 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
       queue = pipelinedResponses.get(nodeKey);
       connection = connections.get(nodeKey);
     } else {
-      queue = new LinkedList<>();
-      connection = getConnection(nodeKey);
-      pipelinedResponses.put(nodeKey, queue);
-      connections.put(nodeKey, connection);
+      pipelinedResponses.putIfAbsent(nodeKey, new LinkedList<>());
+      queue = pipelinedResponses.get(nodeKey);
+
+      Connection newOne = getConnection(nodeKey);
+      connections.putIfAbsent(nodeKey, newOne);
+      connection = connections.get(nodeKey);
+      if (connection != newOne) {
+        log.debug("Duplicate connection to {}, closing it.", nodeKey);
+        IOUtils.closeQuietly(newOne);
+      }
     }
 
     connection.sendCommand(commandObject.getArguments());
@@ -85,25 +108,52 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
 
   @Override
   public void close() {
-    sync();
-    for (Connection connection : connections.values()) {
-      connection.close();
+    try {
+      sync();
+    } finally {
+      connections.values().forEach(IOUtils::closeQuietly);
     }
   }
 
   public final void sync() {
-    if (synced) {
+    if (syncing) {
       return;
     }
-    for (Map.Entry<HostAndPort, Queue<Response<?>>> entry : pipelinedResponses.entrySet()) {
+    syncing = true;
+
+    CountDownLatch countDownLatch = new CountDownLatch(pipelinedResponses.size());
+    Iterator<Map.Entry<HostAndPort, Queue<Response<?>>>> pipelinedResponsesIterator
+        = pipelinedResponses.entrySet().iterator();
+    while (pipelinedResponsesIterator.hasNext()) {
+      Map.Entry<HostAndPort, Queue<Response<?>>> entry = pipelinedResponsesIterator.next();
       HostAndPort nodeKey = entry.getKey();
       Queue<Response<?>> queue = entry.getValue();
-      List<Object> unformatted = connections.get(nodeKey).getMany(queue.size());
-      for (Object o : unformatted) {
-        queue.poll().set(o);
-      }
+      Connection connection = connections.get(nodeKey);
+      executorService.submit(() -> {
+        try {
+          List<Object> unformatted = connection.getMany(queue.size());
+          for (Object o : unformatted) {
+            queue.poll().set(o);
+          }
+        } catch (JedisConnectionException jce) {
+          log.error("Error with connection to " + nodeKey, jce);
+          // cleanup the connection
+          pipelinedResponsesIterator.remove();
+          connections.remove(nodeKey);
+          IOUtils.closeQuietly(connection);
+        } finally {
+          countDownLatch.countDown();
+        }
+      });
     }
-    synced = true;
+
+    try {
+      countDownLatch.await();
+    } catch (InterruptedException e) {
+      log.error("Thread is interrupted during sync.", e);
+    }
+
+    syncing = false;
   }
 
   @Override
@@ -339,6 +389,11 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
   @Override
   public Response<String> get(String key) {
     return appendCommand(commandObjects.get(key));
+  }
+
+  @Override
+  public Response<String> setGet(String key, String value, SetParams params) {
+    return appendCommand(commandObjects.setGet(key, value, params));
   }
 
   @Override
@@ -982,7 +1037,7 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
   }
 
   @Override
-  public Response<List<Double>> zmscore(String key, String... members) {    
+  public Response<List<Double>> zmscore(String key, String... members) {
     return appendCommand(commandObjects.zmscore(key, members));
   }
 
@@ -3156,6 +3211,11 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
   }
 
   @Override
+  public Response<byte[]> setGet(byte[] key, byte[] value, SetParams params) {
+    return appendCommand(commandObjects.setGet(key, value, params));
+  }
+
+  @Override
   public Response<byte[]> getDel(byte[] key) {
     return appendCommand(commandObjects.getDel(key));
   }
@@ -3307,8 +3367,33 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
 
   // RediSearch commands
   @Override
+  public Response<String> ftCreate(String indexName, IndexOptions indexOptions, Schema schema) {
+    return appendCommand(commandObjects.ftCreate(indexName, indexOptions, schema));
+  }
+
+  @Override
+  public Response<String> ftCreate(String indexName, FTCreateParams createParams, Iterable<SchemaField> schemaFields) {
+    return appendCommand(commandObjects.ftCreate(indexName, createParams, schemaFields));
+  }
+
+  @Override
   public Response<String> ftAlter(String indexName, Schema schema) {
     return appendCommand(commandObjects.ftAlter(indexName, schema));
+  }
+
+  @Override
+  public Response<String> ftAlter(String indexName, Iterable<SchemaField> schemaFields) {
+    return appendCommand(commandObjects.ftAlter(indexName, schemaFields));
+  }
+
+  @Override
+  public Response<SearchResult> ftSearch(String indexName, String query) {
+    return appendCommand(commandObjects.ftSearch(indexName, query));
+  }
+
+  @Override
+  public Response<SearchResult> ftSearch(String indexName, String query, FTSearchParams searchParams) {
+    return appendCommand(commandObjects.ftSearch(indexName, query, searchParams));
   }
 
   @Override
@@ -3394,6 +3479,16 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
   @Override
   public Response<Set<String>> ftDictDumpBySampleKey(String indexName, String dictionary) {
     return appendCommand(commandObjects.ftDictDumpBySampleKey(indexName, dictionary));
+  }
+
+  @Override
+  public Response<Map<String, Map<String, Double>>> ftSpellCheck(String index, String query) {
+    return appendCommand(commandObjects.ftSpellCheck(index, query));
+  }
+
+  @Override
+  public Response<Map<String, Map<String, Double>>> ftSpellCheck(String index, String query, FTSpellCheckParams spellCheckParams) {
+    return appendCommand(commandObjects.ftSpellCheck(index, query, spellCheckParams));
   }
 
   @Override
@@ -3757,11 +3852,6 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
   public Response<Object> jsonArrPop(String key, Path path) {
     return appendCommand(commandObjects.jsonArrPop(key, path));
   }
-
-  @Override
-  public Response<String> ftCreate(String indexName, IndexOptions indexOptions, Schema schema) {
-    return appendCommand(commandObjects.ftCreate(indexName, indexOptions, schema));
-  }
   // RedisJSON commands
 
   // RedisTimeSeries commands
@@ -3871,6 +3961,11 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
   }
 
   @Override
+  public Response<TSElement> tsGet(String key, TSGetParams getParams) {
+    return appendCommand(commandObjects.tsGet(key, getParams));
+  }
+
+  @Override
   public Response<List<TSKeyValue<TSElement>>> tsMGet(TSMGetParams multiGetParams, String... filters) {
     return appendCommand(commandObjects.tsMGet(multiGetParams, filters));
   }
@@ -3878,6 +3973,11 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
   @Override
   public Response<String> tsCreateRule(String sourceKey, String destKey, AggregationType aggregationType, long timeBucket) {
     return appendCommand(commandObjects.tsCreateRule(sourceKey, destKey, aggregationType, timeBucket));
+  }
+
+  @Override
+  public Response<String> tsCreateRule(String sourceKey, String destKey, AggregationType aggregationType, long bucketDuration, long alignTimestamp) {
+    return appendCommand(commandObjects.tsCreateRule(sourceKey, destKey, aggregationType, bucketDuration, alignTimestamp));
   }
 
   @Override
@@ -3940,6 +4040,11 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
   @Override
   public Response<String> bfLoadChunk(String key, long iterator, byte[] data) {
     return appendCommand(commandObjects.bfLoadChunk(key, iterator, data));
+  }
+
+  @Override
+  public Response<Long> bfCard(String key) {
+    return appendCommand(commandObjects.bfCard(key));
   }
 
   @Override
@@ -4091,6 +4196,86 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
   public Response<Map<String, Object>> topkInfo(String key) {
     return appendCommand(commandObjects.topkInfo(key));
   }
+
+  @Override
+  public Response<String> tdigestCreate(String key) {
+    return appendCommand(commandObjects.tdigestCreate(key));
+  }
+
+  @Override
+  public Response<String> tdigestCreate(String key, int compression) {
+    return appendCommand(commandObjects.tdigestCreate(key, compression));
+  }
+
+  @Override
+  public Response<String> tdigestReset(String key) {
+    return appendCommand(commandObjects.tdigestReset(key));
+  }
+
+  @Override
+  public Response<String> tdigestMerge(String destinationKey, String... sourceKeys) {
+    return appendCommand(commandObjects.tdigestMerge(destinationKey, sourceKeys));
+  }
+
+  @Override
+  public Response<String> tdigestMerge(TDigestMergeParams mergeParams, String destinationKey, String... sourceKeys) {
+    return appendCommand(commandObjects.tdigestMerge(mergeParams, destinationKey, sourceKeys));
+  }
+
+  @Override
+  public Response<Map<String, Object>> tdigestInfo(String key) {
+    return appendCommand(commandObjects.tdigestInfo(key));
+  }
+
+  @Override
+  public Response<String> tdigestAdd(String key, double... values) {
+    return appendCommand(commandObjects.tdigestAdd(key, values));
+  }
+
+  @Override
+  public Response<List<Double>> tdigestCDF(String key, double... values) {
+    return appendCommand(commandObjects.tdigestCDF(key, values));
+  }
+
+  @Override
+  public Response<List<Double>> tdigestQuantile(String key, double... quantiles) {
+    return appendCommand(commandObjects.tdigestQuantile(key, quantiles));
+  }
+
+  @Override
+  public Response<Double> tdigestMin(String key) {
+    return appendCommand(commandObjects.tdigestMin(key));
+  }
+
+  @Override
+  public Response<Double> tdigestMax(String key) {
+    return appendCommand(commandObjects.tdigestMax(key));
+  }
+
+  @Override
+  public Response<Double> tdigestTrimmedMean(String key, double lowCutQuantile, double highCutQuantile) {
+    return appendCommand(commandObjects.tdigestTrimmedMean(key, lowCutQuantile, highCutQuantile));
+  }
+
+  @Override
+  public Response<List<Long>> tdigestRank(String key, double... values) {
+    return appendCommand(commandObjects.tdigestRank(key, values));
+  }
+
+  @Override
+  public Response<List<Long>> tdigestRevRank(String key, double... values) {
+    return appendCommand(commandObjects.tdigestRevRank(key, values));
+  }
+
+  @Override
+  public Response<List<Double>> tdigestByRank(String key, long... ranks) {
+    return appendCommand(commandObjects.tdigestByRank(key, ranks));
+  }
+
+  @Override
+  public Response<List<Double>> tdigestByRevRank(String key, long... ranks) {
+    return appendCommand(commandObjects.tdigestByRevRank(key, ranks));
+  }
   // RedisBloom commands
 
   // RedisGraph commands
@@ -4147,5 +4332,9 @@ public abstract class MultiNodePipelineBase implements PipelineCommands, Pipelin
 
   public Response<Long> waitReplicas(int replicas, long timeout) {
     return appendCommand(commandObjects.waitReplicas(replicas, timeout));
+  }
+
+  public void setJsonObjectMapper(JsonObjectMapper jsonObjectMapper) {
+    this.commandObjects.setJsonObjectMapper(jsonObjectMapper);
   }
 }

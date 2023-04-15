@@ -14,10 +14,7 @@ import java.util.Set;
 import org.json.JSONArray;
 
 import redis.clients.jedis.args.*;
-import redis.clients.jedis.bloom.BFInsertParams;
-import redis.clients.jedis.bloom.BFReserveParams;
-import redis.clients.jedis.bloom.CFInsertParams;
-import redis.clients.jedis.bloom.CFReserveParams;
+import redis.clients.jedis.bloom.*;
 import redis.clients.jedis.commands.PipelineBinaryCommands;
 import redis.clients.jedis.commands.PipelineCommands;
 import redis.clients.jedis.commands.ProtocolCommand;
@@ -29,14 +26,13 @@ import redis.clients.jedis.graph.ResultSet;
 import redis.clients.jedis.json.JsonSetParams;
 import redis.clients.jedis.json.Path;
 import redis.clients.jedis.json.Path2;
+import redis.clients.jedis.json.JsonObjectMapper;
 import redis.clients.jedis.params.*;
 import redis.clients.jedis.resps.*;
-import redis.clients.jedis.search.IndexOptions;
-import redis.clients.jedis.search.Query;
-import redis.clients.jedis.search.Schema;
-import redis.clients.jedis.search.SearchResult;
+import redis.clients.jedis.search.*;
 import redis.clients.jedis.search.aggr.AggregationBuilder;
 import redis.clients.jedis.search.aggr.AggregationResult;
+import redis.clients.jedis.search.schemafields.SchemaField;
 import redis.clients.jedis.timeseries.*;
 import redis.clients.jedis.util.KeyValue;
 
@@ -44,6 +40,7 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
     PipelineBinaryCommands, RedisModulePipelineCommands, Closeable {
 
   protected final Connection connection;
+  private final boolean closeConnection;
   private final CommandObjects commandObjects;
   private final GraphCommandObjects graphCommandObjects;
 
@@ -51,15 +48,43 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
   private boolean inWatch = false;
   private boolean inMulti = false;
 
+  /**
+   * Creates a new transaction.
+   * 
+   * A MULTI command will be added to be sent to server. WATCH/UNWATCH/MULTI commands must not be
+   * called with this object.
+   * @param connection connection
+   */
   public TransactionBase(Connection connection) {
     this(connection, true);
   }
 
   /**
-   * If you want to WATCH/UNWATCH keys before MULTI command you should do {@code doMulti = true}.
+   * Creates a new transaction.
+   *
+   * A user wanting to WATCH/UNWATCH keys followed by a call to MULTI ({@link #multi()}) it should
+   * be {@code doMulti=false}.
+   *
+   * @param connection connection
+   * @param doMulti {@code false} should be set to enable manual WATCH, UNWATCH and MULTI
    */
   public TransactionBase(Connection connection, boolean doMulti) {
+    this(connection, doMulti, false);
+  }
+
+  /**
+   * Creates a new transaction.
+   *
+   * A user wanting to WATCH/UNWATCH keys followed by a call to MULTI ({@link #multi()}) it should
+   * be {@code doMulti=false}.
+   *
+   * @param connection connection
+   * @param doMulti {@code false} should be set to enable manual WATCH, UNWATCH and MULTI
+   * @param closeConnection should the 'connection' be closed when 'close()' is called?
+   */
+  public TransactionBase(Connection connection, boolean doMulti, boolean closeConnection) {
     this.connection = connection;
+    this.closeConnection = closeConnection;
     this.commandObjects = new CommandObjects();
     this.graphCommandObjects = new GraphCommandObjects(this.connection);
     if (doMulti) multi();
@@ -104,7 +129,13 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
 
   @Override
   public final void close() {
-    clear();
+    try {
+      clear();
+    } finally {
+      if (closeConnection) {
+        connection.close();
+      }
+    }
   }
 
   public final void clear() {
@@ -406,6 +437,11 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
   @Override
   public Response<String> get(String key) {
     return appendCommand(commandObjects.get(key));
+  }
+
+  @Override
+  public Response<String> setGet(String key, String value, SetParams params) {
+    return appendCommand(commandObjects.setGet(key, value, params));
   }
 
   @Override
@@ -3225,6 +3261,11 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
   }
 
   @Override
+  public Response<byte[]> setGet(byte[] key, byte[] value, SetParams params) {
+    return appendCommand(commandObjects.setGet(key, value, params));
+  }
+
+  @Override
   public Response<byte[]> getDel(byte[] key) {
     return appendCommand(commandObjects.getDel(key));
   }
@@ -3381,8 +3422,28 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
   }
 
   @Override
+  public Response<String> ftCreate(String indexName, FTCreateParams createParams, Iterable<SchemaField> schemaFields) {
+    return appendCommand(commandObjects.ftCreate(indexName, createParams, schemaFields));
+  }
+
+  @Override
   public Response<String> ftAlter(String indexName, Schema schema) {
     return appendCommand(commandObjects.ftAlter(indexName, schema));
+  }
+
+  @Override
+  public Response<String> ftAlter(String indexName, Iterable<SchemaField> schemaFields) {
+    return appendCommand(commandObjects.ftAlter(indexName, schemaFields));
+  }
+
+  @Override
+  public Response<SearchResult> ftSearch(String indexName, String query) {
+    return appendCommand(commandObjects.ftSearch(indexName, query));
+  }
+
+  @Override
+  public Response<SearchResult> ftSearch(String indexName, String query, FTSearchParams searchParams) {
+    return appendCommand(commandObjects.ftSearch(indexName, query, searchParams));
   }
 
   @Override
@@ -3468,6 +3529,16 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
   @Override
   public Response<Set<String>> ftDictDumpBySampleKey(String indexName, String dictionary) {
     return appendCommand(commandObjects.ftDictDumpBySampleKey(indexName, dictionary));
+  }
+
+  @Override
+  public Response<Map<String, Map<String, Double>>> ftSpellCheck(String index, String query) {
+    return appendCommand(commandObjects.ftSpellCheck(index, query));
+  }
+
+  @Override
+  public Response<Map<String, Map<String, Double>>> ftSpellCheck(String index, String query, FTSpellCheckParams spellCheckParams) {
+    return appendCommand(commandObjects.ftSpellCheck(index, query, spellCheckParams));
   }
 
   @Override
@@ -3941,6 +4012,11 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
   }
 
   @Override
+  public Response<TSElement> tsGet(String key, TSGetParams getParams) {
+    return appendCommand(commandObjects.tsGet(key, getParams));
+  }
+
+  @Override
   public Response<List<TSKeyValue<TSElement>>> tsMGet(TSMGetParams multiGetParams, String... filters) {
     return appendCommand(commandObjects.tsMGet(multiGetParams, filters));
   }
@@ -3948,6 +4024,11 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
   @Override
   public Response<String> tsCreateRule(String sourceKey, String destKey, AggregationType aggregationType, long timeBucket) {
     return appendCommand(commandObjects.tsCreateRule(sourceKey, destKey, aggregationType, timeBucket));
+  }
+
+  @Override
+  public Response<String> tsCreateRule(String sourceKey, String destKey, AggregationType aggregationType, long bucketDuration, long alignTimestamp) {
+    return appendCommand(commandObjects.tsCreateRule(sourceKey, destKey, aggregationType, bucketDuration, alignTimestamp));
   }
 
   @Override
@@ -4010,6 +4091,11 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
   @Override
   public Response<String> bfLoadChunk(String key, long iterator, byte[] data) {
     return appendCommand(commandObjects.bfLoadChunk(key, iterator, data));
+  }
+
+  @Override
+  public Response<Long> bfCard(String key) {
+    return appendCommand(commandObjects.bfCard(key));
   }
 
   @Override
@@ -4161,6 +4247,86 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
   public Response<Map<String, Object>> topkInfo(String key) {
     return appendCommand(commandObjects.topkInfo(key));
   }
+
+  @Override
+  public Response<String> tdigestCreate(String key) {
+    return appendCommand(commandObjects.tdigestCreate(key));
+  }
+
+  @Override
+  public Response<String> tdigestCreate(String key, int compression) {
+    return appendCommand(commandObjects.tdigestCreate(key, compression));
+  }
+
+  @Override
+  public Response<String> tdigestReset(String key) {
+    return appendCommand(commandObjects.tdigestReset(key));
+  }
+
+  @Override
+  public Response<String> tdigestMerge(String destinationKey, String... sourceKeys) {
+    return appendCommand(commandObjects.tdigestMerge(destinationKey, sourceKeys));
+  }
+
+  @Override
+  public Response<String> tdigestMerge(TDigestMergeParams mergeParams, String destinationKey, String... sourceKeys) {
+    return appendCommand(commandObjects.tdigestMerge(mergeParams, destinationKey, sourceKeys));
+  }
+
+  @Override
+  public Response<Map<String, Object>> tdigestInfo(String key) {
+    return appendCommand(commandObjects.tdigestInfo(key));
+  }
+
+  @Override
+  public Response<String> tdigestAdd(String key, double... values) {
+    return appendCommand(commandObjects.tdigestAdd(key, values));
+  }
+
+  @Override
+  public Response<List<Double>> tdigestCDF(String key, double... values) {
+    return appendCommand(commandObjects.tdigestCDF(key, values));
+  }
+
+  @Override
+  public Response<List<Double>> tdigestQuantile(String key, double... quantiles) {
+    return appendCommand(commandObjects.tdigestQuantile(key, quantiles));
+  }
+
+  @Override
+  public Response<Double> tdigestMin(String key) {
+    return appendCommand(commandObjects.tdigestMin(key));
+  }
+
+  @Override
+  public Response<Double> tdigestMax(String key) {
+    return appendCommand(commandObjects.tdigestMax(key));
+  }
+
+  @Override
+  public Response<Double> tdigestTrimmedMean(String key, double lowCutQuantile, double highCutQuantile) {
+    return appendCommand(commandObjects.tdigestTrimmedMean(key, lowCutQuantile, highCutQuantile));
+  }
+
+  @Override
+  public Response<List<Long>> tdigestRank(String key, double... values) {
+    return appendCommand(commandObjects.tdigestRank(key, values));
+  }
+
+  @Override
+  public Response<List<Long>> tdigestRevRank(String key, double... values) {
+    return appendCommand(commandObjects.tdigestRevRank(key, values));
+  }
+
+  @Override
+  public Response<List<Double>> tdigestByRank(String key, long... ranks) {
+    return appendCommand(commandObjects.tdigestByRank(key, ranks));
+  }
+
+  @Override
+  public Response<List<Double>> tdigestByRevRank(String key, long... ranks) {
+    return appendCommand(commandObjects.tdigestByRevRank(key, ranks));
+  }
   // RedisBloom commands
 
   // RedisGraph commands
@@ -4233,5 +4399,9 @@ public abstract class TransactionBase extends Queable implements PipelineCommand
 
   public <T> Response<T> executeCommand(CommandObject<T> command) {
     return appendCommand(command);
+  }
+
+  public void setJsonObjectMapper(JsonObjectMapper jsonObjectMapper) {
+    this.commandObjects.setJsonObjectMapper(jsonObjectMapper);
   }
 }

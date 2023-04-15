@@ -4,15 +4,23 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.net.Socket;
 import java.net.SocketException;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.function.Supplier;
 
+import redis.clients.jedis.Protocol.Command;
+import redis.clients.jedis.Protocol.Keyword;
+import redis.clients.jedis.args.ClientAttributeOption;
 import redis.clients.jedis.args.Rawable;
 import redis.clients.jedis.commands.ProtocolCommand;
 import redis.clients.jedis.exceptions.JedisConnectionException;
 import redis.clients.jedis.exceptions.JedisDataException;
 import redis.clients.jedis.exceptions.JedisException;
 import redis.clients.jedis.util.IOUtils;
+import redis.clients.jedis.util.JedisMetaInfo;
 import redis.clients.jedis.util.RedisInputStream;
 import redis.clients.jedis.util.RedisOutputStream;
 import redis.clients.jedis.util.SafeEncoder;
@@ -211,6 +219,9 @@ public class Connection implements Closeable {
     }
   }
 
+  /**
+   * Close the socket and disconnect the server.
+   */
   public void disconnect() {
     if (isConnected()) {
       try {
@@ -336,57 +347,102 @@ public class Connection implements Closeable {
   private void initializeFromClientConfig(JedisClientConfig config) {
     try {
       connect();
-      String password = config.getPassword();
-      if (password != null) {
-        String user = config.getUser();
-        if (user != null) {
-          auth(user, password);
-        } else {
-          auth(password);
-        }
+
+      Supplier<RedisCredentials> credentialsProvider = config.getCredentialsProvider();
+      if (credentialsProvider instanceof RedisCredentialsProvider) {
+        ((RedisCredentialsProvider) credentialsProvider).prepare();
+        auth(credentialsProvider);
+        ((RedisCredentialsProvider) credentialsProvider).cleanUp();
+      } else {
+        auth(credentialsProvider);
       }
+
+      List<CommandArguments> fireAndForgetMsg = new ArrayList<>();
+
       int dbIndex = config.getDatabase();
       if (dbIndex > 0) {
-        select(dbIndex);
+        fireAndForgetMsg.add(new CommandArguments(Command.SELECT).add(Protocol.toByteArray(dbIndex)));
       }
+
       String clientName = config.getClientName();
       if (clientName != null) {
-        // TODO: need to figure out something without encoding
-        clientSetname(clientName);
+        fireAndForgetMsg.add(new CommandArguments(Command.CLIENT).add(Keyword.SETNAME).add(clientName));
+      }
+
+      String libName = JedisMetaInfo.getArtifactId();
+      if (libName != null) {
+        fireAndForgetMsg.add(new CommandArguments(Command.CLIENT).add(Keyword.SETINFO)
+            .add(ClientAttributeOption.LIB_NAME.getRaw()).add(libName));
+      }
+
+      String libVersion = JedisMetaInfo.getVersion();
+      if (libVersion != null) {
+        fireAndForgetMsg.add(new CommandArguments(Command.CLIENT).add(Keyword.SETINFO)
+            .add(ClientAttributeOption.LIB_VER.getRaw()).add(libVersion));
+      }
+
+      for (CommandArguments arg : fireAndForgetMsg) {
+        sendCommand(arg);
+      }
+
+      List<Object> objects = getMany(fireAndForgetMsg.size());
+      for (Object obj : objects) {
+        if (obj instanceof JedisDataException) {
+          JedisDataException e = (JedisDataException)obj;
+          String errorMsg = e.getMessage().toUpperCase();
+          if (errorMsg.contains("UNKNOWN") ||
+              errorMsg.contains("NOAUTH")) { // TODO: not filter out NOAUTH
+            // ignore
+          } else {
+            throw e;
+          }
+        }
       }
     } catch (JedisException je) {
       try {
-        if (isConnected()) {
-          quit();
-        }
+        setBroken();
         disconnect();
       } catch (Exception e) {
-        //
+        // the first exception 'je' will be thrown
       }
       throw je;
     }
   }
 
-  private String auth(final String password) {
-    sendCommand(Protocol.Command.AUTH, password);
-    return getStatusCodeReply();
+  private void auth(final Supplier<RedisCredentials> credentialsProvider) {
+    RedisCredentials credentials = credentialsProvider.get();
+    if (credentials == null || credentials.getPassword() == null) return;
+
+    // Source: https://stackoverflow.com/a/9670279/4021802
+    ByteBuffer passBuf = Protocol.CHARSET.encode(CharBuffer.wrap(credentials.getPassword()));
+    byte[] rawPass = Arrays.copyOfRange(passBuf.array(), passBuf.position(), passBuf.limit());
+    Arrays.fill(passBuf.array(), (byte) 0); // clear sensitive data
+
+    if (credentials.getUser() != null) {
+      sendCommand(Protocol.Command.AUTH, SafeEncoder.encode(credentials.getUser()), rawPass);
+    } else {
+      sendCommand(Protocol.Command.AUTH, rawPass);
+    }
+
+    Arrays.fill(rawPass, (byte) 0); // clear sensitive data
+
+    // clearing 'char[] credentials.getPassword()' should be
+    // handled in RedisCredentialsProvider.cleanUp()
+
+    getStatusCodeReply(); // OK
   }
 
-  private String auth(final String user, final String password) {
-    sendCommand(Protocol.Command.AUTH, user, password);
-    return getStatusCodeReply();
-  }
-
+  @Deprecated
   public String select(final int index) {
     sendCommand(Protocol.Command.SELECT, Protocol.toByteArray(index));
     return getStatusCodeReply();
   }
 
-  private String clientSetname(final String name) {
-    sendCommand(Protocol.Command.CLIENT, Protocol.Keyword.SETNAME.name(), name);
-    return getStatusCodeReply();
-  }
-
+  /**
+   * @deprecated The QUIT command is deprecated, see <a href="https://github.com/redis/redis/issues/11420">#11420</a>.
+   * {@link Connection#disconnect()} can be used instead.
+   */
+  @Deprecated
   public String quit() {
     sendCommand(Protocol.Command.QUIT);
     String quitReturn = getStatusCodeReply();

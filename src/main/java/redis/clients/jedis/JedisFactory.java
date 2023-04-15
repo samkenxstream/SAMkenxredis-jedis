@@ -142,6 +142,11 @@ public class JedisFactory implements PooledObjectFactory<Jedis> {
     ((DefaultJedisSocketFactory) jedisSocketFactory).updateHostAndPort(hostAndPort);
   }
 
+  /**
+   * @deprecated Use {@link RedisCredentialsProvider} through
+   * {@link JedisClientConfig#getCredentialsProvider()}.
+   */
+  @Deprecated
   public void setPassword(final String password) {
     this.clientConfig.updatePassword(password);
   }
@@ -159,14 +164,6 @@ public class JedisFactory implements PooledObjectFactory<Jedis> {
     final Jedis jedis = pooledJedis.getObject();
     if (jedis.isConnected()) {
       try {
-        // need a proper test, probably with mock
-        if (!jedis.isBroken()) {
-          jedis.quit();
-        }
-      } catch (RuntimeException e) {
-        logger.debug("Error while QUIT", e);
-      }
-      try {
         jedis.close();
       } catch (RuntimeException e) {
         logger.debug("Error while close", e);
@@ -179,21 +176,9 @@ public class JedisFactory implements PooledObjectFactory<Jedis> {
     Jedis jedis = null;
     try {
       jedis = new Jedis(jedisSocketFactory, clientConfig);
-      jedis.connect();
       return new DefaultPooledObject<>(jedis);
     } catch (JedisException je) {
-      if (jedis != null) {
-        try {
-          jedis.quit();
-        } catch (RuntimeException e) {
-          logger.debug("Error while QUIT", e);
-        }
-        try {
-          jedis.close();
-        } catch (RuntimeException e) {
-          logger.debug("Error while close", e);
-        }
-      }
+      logger.debug("Error while makeObject", je);
       throw je;
     }
   }
@@ -207,8 +192,18 @@ public class JedisFactory implements PooledObjectFactory<Jedis> {
   public boolean validateObject(PooledObject<Jedis> pooledJedis) {
     final Jedis jedis = pooledJedis.getObject();
     try {
-      // check HostAndPort ??
-      return jedis.getConnection().isConnected() && jedis.ping().equals("PONG");
+      boolean targetHasNotChanged = true;
+      if (jedisSocketFactory instanceof DefaultJedisSocketFactory) {
+        HostAndPort targetAddress = ((DefaultJedisSocketFactory) jedisSocketFactory).getHostAndPort();
+        HostAndPort objectAddress = jedis.getConnection().getHostAndPort();
+
+        targetHasNotChanged = targetAddress.getHost().equals(objectAddress.getHost())
+            && targetAddress.getPort() == objectAddress.getPort();
+      }
+
+      return targetHasNotChanged
+          && jedis.getConnection().isConnected()
+          && jedis.ping().equals("PONG");
     } catch (final Exception e) {
       logger.error("Error while validating pooled Jedis object.", e);
       return false;

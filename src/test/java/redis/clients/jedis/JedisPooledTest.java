@@ -1,11 +1,13 @@
 package redis.clients.jedis;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.commons.pool2.impl.GenericObjectPoolConfig;
 import org.junit.Test;
 
@@ -89,7 +91,8 @@ public class JedisPooledTest {
 
   @Test
   public void customClientName() {
-    try (JedisPooled pool = new JedisPooled(hnp, DefaultJedisClientConfig.builder().clientName("my_shiny_client_name").build());
+    try (JedisPooled pool = new JedisPooled(hnp, DefaultJedisClientConfig.builder()
+        .clientName("my_shiny_client_name").build());
         Connection jedis = pool.getPool().getResource()) {
       assertEquals("my_shiny_client_name", new Jedis(jedis).clientGetname());
     }
@@ -166,8 +169,87 @@ public class JedisPooledTest {
       assertEquals(0, pool.getPool().getNumActive());
 
       factory.setPassword("foobared");
-      pool.set("foo", "bar");
-      assertEquals("bar", pool.get("foo"));
+      assertNull(pool.get("foo"));
+    }
+  }
+
+  @Test
+  public void testResetValidCredentials() {
+    DefaultRedisCredentialsProvider credentialsProvider = 
+        new DefaultRedisCredentialsProvider(new DefaultRedisCredentials(null, "bad password"));
+
+    try (JedisPooled pool = new JedisPooled(HostAndPorts.getRedisServers().get(0),
+        DefaultJedisClientConfig.builder().credentialsProvider(credentialsProvider)
+            .clientName("my_shiny_client_name").build())) {
+      try {
+        pool.get("foo");
+        fail("Should not get resource from pool");
+      } catch (JedisException e) { }
+      assertEquals(0, pool.getPool().getNumActive());
+
+      credentialsProvider.setCredentials(new DefaultRedisCredentials(null, "foobared"));
+      assertNull(pool.get("foo"));
+    }
+  }
+
+  @Test
+  public void testCredentialsProvider() {
+    final AtomicInteger prepareCount = new AtomicInteger();
+    final AtomicInteger cleanupCount = new AtomicInteger();
+
+    RedisCredentialsProvider credentialsProvider = new RedisCredentialsProvider() {
+      boolean firstCall = true;
+
+      @Override
+      public void prepare() {
+        prepareCount.incrementAndGet();
+      }
+
+      @Override
+      public RedisCredentials get() {
+        if (firstCall) {
+          firstCall = false;
+          return new RedisCredentials() { };
+        }
+
+        return new RedisCredentials() {
+          @Override
+          public String getUser() {
+            return null;
+          }
+
+          @Override
+          public char[] getPassword() {
+            return "foobared".toCharArray();
+          }
+        };
+      }
+
+      @Override
+      public void cleanUp() {
+        cleanupCount.incrementAndGet();
+      }
+    };
+
+    // TODO: do it without the help of pool config; from Connection constructor? (configurable) force ping?
+    GenericObjectPoolConfig<Connection> poolConfig = new GenericObjectPoolConfig<>();
+    poolConfig.setMaxTotal(1);
+    poolConfig.setTestOnBorrow(true);
+    try (JedisPooled pool = new JedisPooled(HostAndPorts.getRedisServers().get(0),
+        DefaultJedisClientConfig.builder().credentialsProvider(credentialsProvider)
+            .build(), poolConfig)) {
+      try {
+        pool.get("foo");
+        fail("Should not get resource from pool");
+      } catch (JedisException e) {
+      }
+      assertEquals(0, pool.getPool().getNumActive() + pool.getPool().getNumIdle() + pool.getPool().getNumWaiters());
+      assertEquals(1, prepareCount.get());
+      assertEquals(1, cleanupCount.get());
+
+      assertNull(pool.get("foo"));
+      assertEquals(2, prepareCount.get());
+      assertEquals(2, cleanupCount.get());
     }
   }
 }

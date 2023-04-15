@@ -237,7 +237,9 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
     connection.connect();
   }
 
-  // Legacy
+  /**
+   * Closing the socket will disconnect the server connection.
+   */
   public void disconnect() {
     connection.disconnect();
   }
@@ -320,6 +322,107 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   }
 
   /**
+   * @return <code>PONG</code>
+   */
+  @Override
+  public String ping() {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(Command.PING);
+    return connection.getStatusCodeReply();
+  }
+
+  /**
+   * Works same as {@link Jedis#ping()} but returns argument message instead of <code>PONG</code>.
+   * @param message
+   * @return message
+   */
+  public byte[] ping(final byte[] message) {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(Command.PING, message);
+    return connection.getBinaryBulkReply();
+  }
+
+  /**
+   * Select the DB with having the specified zero-based numeric index. For default every new
+   * connection connection is automatically selected to DB 0.
+   * @param index
+   * @return OK
+   */
+  @Override
+  public String select(final int index) {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(SELECT, toByteArray(index));
+    String statusCodeReply = connection.getStatusCodeReply();
+    this.db = index;
+    return statusCodeReply;
+  }
+
+  @Override
+  public String swapDB(final int index1, final int index2) {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(SWAPDB, toByteArray(index1), toByteArray(index2));
+    return connection.getStatusCodeReply();
+  }
+
+  /**
+   * Delete all the keys of the currently selected DB. This command never fails.
+   * @return OK
+   */
+  @Override
+  public String flushDB() {
+    checkIsInMultiOrPipeline();
+    return connection.executeCommand(commandObjects.flushDB());
+  }
+
+  /**
+   * Delete all the keys of the currently selected DB. This command never fails.
+   * @param flushMode
+   * @return OK
+   */
+  @Override
+  public String flushDB(FlushMode flushMode) {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(FLUSHDB, flushMode.getRaw());
+    return connection.getStatusCodeReply();
+  }
+
+  /**
+   * Delete all the keys of all the existing databases, not just the currently selected one. This
+   * command never fails.
+   * @return OK
+   */
+  @Override
+  public String flushAll() {
+    checkIsInMultiOrPipeline();
+    return connection.executeCommand(commandObjects.flushAll());
+  }
+
+  /**
+   * Delete all the keys of all the existing databases, not just the currently selected one. This
+   * command never fails.
+   * @param flushMode
+   * @return OK
+   */
+  @Override
+  public String flushAll(FlushMode flushMode) {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(FLUSHALL, flushMode.getRaw());
+    return connection.getStatusCodeReply();
+  }
+
+  /**
+   * Ask the server to silently close the connection.
+   * @deprecated The QUIT command is deprecated, see <a href="https://github.com/redis/redis/issues/11420">#11420</a>.
+   * {@link Jedis#disconnect()} can be used instead.
+   */
+  @Override
+  @Deprecated
+  public String quit() {
+    checkIsInMultiOrPipeline();
+    return connection.quit();
+  }
+
+  /**
    * COPY source destination [DB destination-db] [REPLACE]
    *
    * @param srcKey the source key.
@@ -347,27 +450,6 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   }
 
   /**
-   * @return <code>PONG</code>
-   */
-  @Override
-  public String ping() {
-    checkIsInMultiOrPipeline();
-    connection.sendCommand(Command.PING);
-    return connection.getStatusCodeReply();
-  }
-
-  /**
-   * Works same as {@link Jedis#ping()} but returns argument message instead of <code>PONG</code>.
-   * @param message
-   * @return message
-   */
-  public byte[] ping(final byte[] message) {
-    checkIsInMultiOrPipeline();
-    connection.sendCommand(Command.PING, message);
-    return connection.getBinaryBulkReply();
-  }
-
-  /**
    * Set the string value as value of the key. The string can't be longer than 1073741824 bytes (1
    * GB).
    * <p>
@@ -387,8 +469,11 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
    * GB).
    * @param key
    * @param value
-   * @param params
-   * @return OK
+   * @param params NX|XX, NX -- Only set the key if it does not already exist. XX -- Only set the
+   *          key if it already exists. EX|PX, expire time units: EX = seconds; PX = milliseconds
+   * @return simple-string-reply {@code OK} if {@code SET} was executed correctly, or {@code null}
+   * if the {@code SET} operation was not performed because the user specified the NX or XX option
+   * but the condition was not met.
    */
   @Override
   public String set(final byte[] key, final byte[] value, final SetParams params) {
@@ -411,6 +496,12 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
     return connection.executeCommand(commandObjects.get(key));
   }
 
+  @Override
+  public byte[] setGet(final byte[] key, final byte[] value, final SetParams params) {
+    checkIsInMultiOrPipeline();
+    return connection.executeCommand(commandObjects.setGet(key, value, params));
+  }
+
   /**
    * Get the value of key and delete the key. This command is similar to GET, except for the fact
    * that it also deletes the key on success (if and only if the key's value type is a string).
@@ -429,15 +520,6 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   public byte[] getEx(final byte[] key, final GetExParams params) {
     checkIsInMultiOrPipeline();
     return connection.executeCommand(commandObjects.getEx(key, params));
-  }
-
-  /**
-   * Ask the server to silently close the connection.
-   */
-  @Override
-  public String quit() {
-    checkIsInMultiOrPipeline();
-    return connection.quit();
   }
 
   /**
@@ -520,29 +602,6 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   public String type(final byte[] key) {
     checkIsInMultiOrPipeline();
     return connection.executeCommand(commandObjects.type(key));
-  }
-
-  /**
-   * Delete all the keys of the currently selected DB. This command never fails.
-   * @return OK
-   */
-  @Override
-  public String flushDB() {
-    checkIsInMultiOrPipeline();
-    connection.sendCommand(FLUSHDB);
-    return connection.getStatusCodeReply();
-  }
-
-  /**
-   * Delete all the keys of the currently selected DB. This command never fails.
-   * @param flushMode
-   * @return OK
-   */
-  @Override
-  public String flushDB(FlushMode flushMode) {
-    checkIsInMultiOrPipeline();
-    connection.sendCommand(FLUSHDB, flushMode.getRaw());
-    return connection.getStatusCodeReply();
   }
 
   /**
@@ -648,9 +707,7 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
    * @see <a href="http://redis.io/commands/expire">Expire Command</a>
    * @param key
    * @param seconds
-   * @return 1: the timeout was set. 0: the timeout was not set since
-   *         the key already has an associated timeout (this may happen only in Redis versions &lt;
-   *         2.1.3, Redis &gt;= 2.1.3 will happily update the timeout), or the key does not exist.
+   * @return 1: the timeout was set. 0: the timeout was not set.
    */
   @Override
   public long expire(final byte[] key, final long seconds) {
@@ -681,9 +738,7 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
    * @see <a href="http://redis.io/commands/pexpire">PEXPIRE Command</a>
    * @param key
    * @param milliseconds
-   * @return 1: the timeout was set. 0: the timeout was not set since
-   *         the key already has an associated timeout (this may happen only in Redis versions <
-   *         2.1.3, Redis >= 2.1.3 will happily update the timeout), or the key does not exist.
+   * @return 1: the timeout was set. 0: the timeout was not set.
    */
   @Override
   public long pexpire(final byte[] key, final long milliseconds) {
@@ -708,7 +763,6 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
     checkIsInMultiOrPipeline();
     return connection.executeCommand(commandObjects.pexpireTime(key));
   }
-
 
   /**
    * EXPIREAT works exactly like {@link Jedis#expire(byte[], long) EXPIRE} but instead to get the
@@ -789,28 +843,6 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   }
 
   /**
-   * Select the DB with having the specified zero-based numeric index. For default every new
-   * connection connection is automatically selected to DB 0.
-   * @param index
-   * @return OK
-   */
-  @Override
-  public String select(final int index) {
-    checkIsInMultiOrPipeline();
-    connection.sendCommand(SELECT, toByteArray(index));
-    String statusCodeReply = connection.getStatusCodeReply();
-    this.db = index;
-    return statusCodeReply;
-  }
-
-  @Override
-  public String swapDB(final int index1, final int index2) {
-    checkIsInMultiOrPipeline();
-    connection.sendCommand(SWAPDB, toByteArray(index1), toByteArray(index2));
-    return connection.getStatusCodeReply();
-  }
-
-  /**
    * Move the specified key from the currently selected DB to the specified destination DB. Note
    * that this command returns 1 only if the key was successfully moved, and 0 if the target key was
    * already there or if the source key was not found at all, so it is possible to use MOVE as a
@@ -825,31 +857,6 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
     checkIsInMultiOrPipeline();
     connection.sendCommand(MOVE, key, toByteArray(dbIndex));
     return connection.getIntegerReply();
-  }
-
-  /**
-   * Delete all the keys of all the existing databases, not just the currently selected one. This
-   * command never fails.
-   * @return OK
-   */
-  @Override
-  public String flushAll() {
-    checkIsInMultiOrPipeline();
-    connection.sendCommand(FLUSHALL);
-    return connection.getStatusCodeReply();
-  }
-
-  /**
-   * Delete all the keys of all the existing databases, not just the currently selected one. This
-   * command never fails.
-   * @param flushMode
-   * @return OK
-   */
-  @Override
-  public String flushAll(FlushMode flushMode) {
-    checkIsInMultiOrPipeline();
-    connection.sendCommand(FLUSHALL, flushMode.getRaw());
-    return connection.getStatusCodeReply();
   }
 
   /**
@@ -3549,14 +3556,14 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   @Override
   public List<byte[]> configGet(final byte[] pattern) {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CONFIG, Keyword.GET.getRaw(), pattern);
+    connection.sendCommand(Command.CONFIG, Keyword.GET.getRaw(), pattern);
     return connection.getBinaryMultiBulkReply();
   }
 
   @Override
   public List<byte[]> configGet(byte[]... patterns) {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CONFIG, joinParameters(Keyword.GET.getRaw(), patterns));
+    connection.sendCommand(Command.CONFIG, joinParameters(Keyword.GET.getRaw(), patterns));
     return connection.getBinaryMultiBulkReply();
   }
 
@@ -3566,7 +3573,7 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   @Override
   public String configResetStat() {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CONFIG, Keyword.RESETSTAT);
+    connection.sendCommand(Command.CONFIG, Keyword.RESETSTAT);
     return connection.getStatusCodeReply();
   }
 
@@ -3599,7 +3606,7 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   @Override
   public String configRewrite() {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CONFIG, Keyword.REWRITE);
+    connection.sendCommand(Command.CONFIG, Keyword.REWRITE);
     return connection.getStatusCodeReply();
   }
 
@@ -3635,14 +3642,14 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   @Override
   public String configSet(final byte[] parameter, final byte[] value) {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CONFIG, Keyword.SET.getRaw(), parameter, value);
+    connection.sendCommand(Command.CONFIG, Keyword.SET.getRaw(), parameter, value);
     return connection.getStatusCodeReply();
   }
 
   @Override
   public String configSet(final byte[]... parameterValues) {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CONFIG, joinParameters(Keyword.SET.getRaw(), parameterValues));
+    connection.sendCommand(Command.CONFIG, joinParameters(Keyword.SET.getRaw(), parameterValues));
     return connection.getStatusCodeReply();
   }
 
@@ -3882,14 +3889,12 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
 
   @Override
   public String scriptKill() {
-    connection.sendCommand(SCRIPT, KILL);
-    return connection.getStatusCodeReply();
+    return connection.executeCommand(commandObjects.scriptKill());
   }
 
   @Override
   public String slowlogReset() {
-    connection.sendCommand(SLOWLOG, Keyword.RESET);
-    return connection.getBulkReply();
+    return connection.executeCommand(commandObjects.slowlogReset());
   }
 
   @Override
@@ -4227,6 +4232,13 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   }
 
   @Override
+  public String clientSetInfo(ClientAttributeOption attr, byte[] value) {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(CLIENT, SETINFO.getRaw(), attr.getRaw(), value);
+    return connection.getStatusCodeReply();
+  }
+
+  @Override
   public String clientSetname(final byte[] name) {
     checkIsInMultiOrPipeline();
     connection.sendCommand(CLIENT, SETNAME.getRaw(), name);
@@ -4278,17 +4290,38 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   }
 
   @Override
+  public String clientUnpause() {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(CLIENT, UNPAUSE);
+    return connection.getBulkReply();
+  }
+
+  @Override
   public String clientNoEvictOn() {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CLIENT,"NO-EVICT", "ON");
+    connection.sendCommand(CLIENT, "NO-EVICT", "ON");
     return connection.getBulkReply();
   }
 
   @Override
   public String clientNoEvictOff() {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CLIENT,"NO-EVICT", "OFF");
+    connection.sendCommand(CLIENT, "NO-EVICT", "OFF");
     return connection.getBulkReply();
+  }
+
+  @Override
+  public String clientNoTouchOn() {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(CLIENT, "NO-TOUCH", "ON");
+    return connection.getStatusCodeReply();
+  }
+
+  @Override
+  public String clientNoTouchOff() {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(CLIENT, "NO-TOUCH", "OFF");
+    return connection.getStatusCodeReply();
   }
 
   public List<String> time() {
@@ -4845,7 +4878,7 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   }
 
   /**
-   * Works same as <tt>ping()</tt> but returns argument message instead of <tt>PONG</tt>.
+   * Works same as {@link #ping()} but returns argument message instead of PONG.
    * @param message
    * @return message
    */
@@ -4878,7 +4911,9 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
    * @param value
    * @param params NX|XX, NX -- Only set the key if it does not already exist. XX -- Only set the
    *          key if it already exists. EX|PX, expire time units: EX = seconds; PX = milliseconds
-   * @return OK
+   * @return simple-string-reply {@code OK} if {@code SET} was executed correctly, or {@code null}
+   * if the {@code SET} operation was not performed because the user specified the NX or XX option
+   * but the condition was not met.
    */
   @Override
   public String set(final String key, final String value, final SetParams params) {
@@ -4899,6 +4934,12 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   public String get(final String key) {
     checkIsInMultiOrPipeline();
     return connection.executeCommand(commandObjects.get(key));
+  }
+
+  @Override
+  public String setGet(final String key, final String value, final SetParams params) {
+    checkIsInMultiOrPipeline();
+    return connection.executeCommand(commandObjects.setGet(key, value, params));
   }
 
   /**
@@ -5667,13 +5708,15 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   }
 
   /**
-   * Remove the specified field from an hash stored at key.
+   * Remove the specified field(s) from a hash stored at key. Specified fields that do not exist
+   * within this hash are ignored.
    * <p>
    * <b>Time complexity:</b> O(1)
    * @param key
    * @param fields
-   * @return If the field was present in the hash it is deleted and 1 is returned, otherwise 0 is
-   *         returned and no operation is performed.
+   * @return The number of fields that were removed from the hash, not including specified but
+   *         non-existing fields. If key does not exist, it is treated as an empty hash and this
+   *         command returns 0.
    */
   @Override
   public long hdel(final String key, final String... fields) {
@@ -7827,14 +7870,14 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   @Override
   public List<String> configGet(final String pattern) {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CONFIG, Keyword.GET.name(), pattern);
+    connection.sendCommand(Command.CONFIG, Keyword.GET.name(), pattern);
     return connection.getMultiBulkReply();
   }
 
   @Override
   public List<String> configGet(String... patterns) {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CONFIG, joinParameters(Keyword.GET.name(), patterns));
+    connection.sendCommand(Command.CONFIG, joinParameters(Keyword.GET.name(), patterns));
     return connection.getMultiBulkReply();
   }
 
@@ -7870,14 +7913,14 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   @Override
   public String configSet(final String parameter, final String value) {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CONFIG, Keyword.SET.name(), parameter, value);
+    connection.sendCommand(Command.CONFIG, Keyword.SET.name(), parameter, value);
     return connection.getStatusCodeReply();
   }
 
   @Override
   public String configSet(final String... parameterValues) {
     checkIsInMultiOrPipeline();
-    connection.sendCommand(CONFIG, joinParameters(Keyword.SET.name(), parameterValues));
+    connection.sendCommand(Command.CONFIG, joinParameters(Keyword.SET.name(), parameterValues));
     return connection.getStatusCodeReply();
   }
 
@@ -8493,6 +8536,13 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   }
 
   @Override
+  public String clientSetInfo(ClientAttributeOption attr, String value) {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(CLIENT, SETINFO.getRaw(), attr.getRaw(), encode(value));
+    return connection.getStatusCodeReply();
+  }
+
+  @Override
   public String clientSetname(final String name) {
     checkIsInMultiOrPipeline();
     connection.sendCommand(CLIENT, SETNAME.name(), name);
@@ -9096,6 +9146,14 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   }
 
   @Override
+  public String moduleLoadEx(String path, ModuleLoadExParams params) {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(new CommandArguments(Command.MODULE).add(LOADEX).add(path)
+        .addParams(params));
+    return connection.getStatusCodeReply();
+  }
+
+  @Override
   public String moduleUnload(final String name) {
     checkIsInMultiOrPipeline();
     connection.sendCommand(Command.MODULE, UNLOAD.name(), name);
@@ -9173,6 +9231,13 @@ public class Jedis implements ServerCommands, DatabaseCommands, JedisCommands, J
   public String lolwut(LolwutParams lolwutParams) {
     checkIsInMultiOrPipeline();
     connection.sendCommand(new CommandArguments(LOLWUT).addParams(lolwutParams));
+    return connection.getBulkReply();
+  }
+
+  @Override
+  public String latencyDoctor() {
+    checkIsInMultiOrPipeline();
+    connection.sendCommand(LATENCY, DOCTOR);
     return connection.getBulkReply();
   }
 

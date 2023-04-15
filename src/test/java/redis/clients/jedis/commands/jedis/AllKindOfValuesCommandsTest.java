@@ -1,6 +1,7 @@
 package redis.clients.jedis.commands.jedis;
 
 import static org.junit.Assert.*;
+
 import static redis.clients.jedis.Protocol.Command.BLPOP;
 import static redis.clients.jedis.Protocol.Command.HGETALL;
 import static redis.clients.jedis.Protocol.Command.GET;
@@ -16,6 +17,8 @@ import static redis.clients.jedis.util.AssertUtil.assertByteArrayListEquals;
 import static redis.clients.jedis.util.AssertUtil.assertCollectionContains;
 
 import java.util.*;
+import org.hamcrest.MatcherAssert;
+import org.hamcrest.Matchers;
 import org.junit.Test;
 
 import redis.clients.jedis.HostAndPort;
@@ -76,6 +79,12 @@ public class AllKindOfValuesCommandsTest extends JedisCommandsTestBase {
 
     String lolwutVersion = jedis.lolwut(new LolwutParams().version(5));
     assertNotNull(lolwutVersion);
+  }
+
+  @Test
+  public void latencyDoctor() {
+    String report = jedis.latencyDoctor();
+    assertNotNull(report);
   }
 
   @Test
@@ -944,6 +953,19 @@ public class AllKindOfValuesCommandsTest extends JedisCommandsTestBase {
   }
 
   @Test
+  public void setGet() {
+    assertEquals("OK", jedis.set("hello", "world"));
+
+    // GET old value
+    assertEquals("world", jedis.setGet("hello", "jedis", setParams()));
+
+    assertEquals("jedis", jedis.get("hello"));
+
+    // GET null value
+    assertNull(jedis.setGet("key", "value", setParams()));
+  }
+
+  @Test
   public void sendCommandTest() {
     Object obj = jedis.sendCommand(SET, "x", "1");
     String returnValue = SafeEncoder.encode((byte[]) obj);
@@ -1071,7 +1093,9 @@ public class AllKindOfValuesCommandsTest extends JedisCommandsTestBase {
 
     CommandDocument sortDoc = docs.get("sort");
     assertEquals("generic", sortDoc.getGroup());
-    assertEquals("Sort the elements in a list, set or sorted set", sortDoc.getSummary());
+    MatcherAssert.assertThat(sortDoc.getSummary(), Matchers.anyOf(
+        Matchers.equalTo("Sort the elements in a list, set or sorted set"),
+        Matchers.equalTo("Sorts the elements in a list, a set, or a sorted set, optionally storing the result.")));
     assertNull(sortDoc.getHistory());
 
     CommandDocument setDoc = docs.get("set");

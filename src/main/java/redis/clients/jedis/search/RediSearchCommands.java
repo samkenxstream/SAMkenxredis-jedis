@@ -1,21 +1,52 @@
 package redis.clients.jedis.search;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
 import redis.clients.jedis.resps.Tuple;
 import redis.clients.jedis.search.aggr.AggregationBuilder;
 import redis.clients.jedis.search.aggr.AggregationResult;
+import redis.clients.jedis.search.schemafields.SchemaField;
 
 public interface RediSearchCommands {
 
   String ftCreate(String indexName, IndexOptions indexOptions, Schema schema);
+
+  default String ftCreate(String indexName, SchemaField... schemaFields) {
+    return ftCreate(indexName, Arrays.asList(schemaFields));
+  }
+
+  default String ftCreate(String indexName, FTCreateParams createParams, SchemaField... schemaFields) {
+    return ftCreate(indexName, createParams, Arrays.asList(schemaFields));
+  }
+
+  default String ftCreate(String indexName, Iterable<SchemaField> schemaFields) {
+    return ftCreate(indexName, FTCreateParams.createParams(), schemaFields);
+  }
+
+  String ftCreate(String indexName, FTCreateParams createParams, Iterable<SchemaField> schemaFields);
 
   default String ftAlter(String indexName, Schema.Field... fields) {
     return ftAlter(indexName, Schema.from(fields));
   }
 
   String ftAlter(String indexName, Schema schema);
+
+  default String ftAlter(String indexName, SchemaField... schemaFields) {
+    return ftAlter(indexName, Arrays.asList(schemaFields));
+  }
+
+  String ftAlter(String indexName, Iterable<SchemaField> schemaFields);
+
+  default SearchResult ftSearch(String indexName) {
+    return ftSearch(indexName, "*");
+  }
+
+  SearchResult ftSearch(String indexName, String query);
+
+  SearchResult ftSearch(String indexName, String query, FTSearchParams params);
 
   SearchResult ftSearch(String indexName, Query query);
 
@@ -30,6 +61,15 @@ public interface RediSearchCommands {
   AggregationResult ftCursorRead(String indexName, long cursorId, int count);
 
   String ftCursorDel(String indexName, long cursorId);
+
+  Map.Entry<AggregationResult, Map<String, Object>> ftProfileAggregate(String indexName,
+      FTProfileParams profileParams, AggregationBuilder aggr);
+
+  Map.Entry<SearchResult, Map<String, Object>> ftProfileSearch(String indexName,
+      FTProfileParams profileParams, Query query);
+
+  Map.Entry<SearchResult, Map<String, Object>> ftProfileSearch(String indexName,
+      FTProfileParams profileParams, String query, FTSearchParams searchParams);
 
   String ftDropIndex(String indexName);
 
@@ -50,6 +90,11 @@ public interface RediSearchCommands {
   long ftDictDelBySampleKey(String indexName, String dictionary, String... terms);
 
   Set<String> ftDictDumpBySampleKey(String indexName, String dictionary);
+
+  Map<String, Map<String, Double>> ftSpellCheck(String index, String query);
+
+  Map<String, Map<String, Double>> ftSpellCheck(String index, String query,
+      FTSpellCheckParams spellCheckParams);
 
   Map<String, Object> ftInfo(String indexName);
 
@@ -84,4 +129,6 @@ public interface RediSearchCommands {
   boolean ftSugDel(String key, String string);
 
   long ftSugLen(String key);
+
+  List<String> ftList();
 }

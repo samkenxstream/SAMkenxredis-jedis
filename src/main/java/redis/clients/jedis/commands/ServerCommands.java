@@ -24,7 +24,10 @@ public interface ServerCommands {
    * Ask the server to close the connection. The connection is closed as soon as all pending replies
    * have been written to the client.
    * @return OK
+   * @deprecated The QUIT command is deprecated, see <a href="https://github.com/redis/redis/issues/11420">#11420</a>.
+   * If available, {@code disconnect()} method in the concerned class can be used instead.
    */
+  @Deprecated
   String quit();
 
   /**
@@ -35,6 +38,14 @@ public interface ServerCommands {
   String flushDB();
 
   /**
+   * Delete all the keys of the currently selected DB. This command never fails. The time-complexity
+   * for this operation is O(N), N being the number of keys in the database.
+   * @param flushMode can be SYNC or ASYNC
+   * @return OK
+   */
+  String flushDB(FlushMode flushMode);
+
+  /**
    * Delete all the keys of all the existing databases, not just the currently selected one.
    * @return a simple string reply (OK)
    */
@@ -42,7 +53,7 @@ public interface ServerCommands {
 
   /**
    * Delete all the keys of all the existing databases, not just the currently selected one.
-   * @param flushMode
+   * @param flushMode SYNC or ASYNC
    * @return a simple string reply (OK)
    */
   String flushAll(FlushMode flushMode);
@@ -53,7 +64,6 @@ public interface ServerCommands {
    * requirepass directive in the configuration file. If password matches the password in the
    * configuration file, the server replies with the OK status code and starts accepting commands.
    * Otherwise, an error is returned and the clients needs to try a new password.
-   * @param password
    * @return the result of the auth
    */
   String auth(String password);
@@ -61,8 +71,6 @@ public interface ServerCommands {
   /**
    * Request for authentication with username and password, based on the ACL feature introduced in
    * Redis 6.0 see https://redis.io/topics/acl
-   * @param user
-   * @param password
    * @return OK
    */
   String auth(String user, String password);
@@ -221,4 +229,20 @@ public interface ServerCommands {
   String lolwut();
 
   String lolwut(LolwutParams lolwutParams);
+
+  /**
+   * The LATENCY DOCTOR command reports about different latency-related issues and advises about
+   * possible remedies.
+   * <p>
+   * This command is the most powerful analysis tool in the latency monitoring framework, and is
+   * able to provide additional statistical data like the average period between latency spikes, the
+   * median deviation, and a human-readable analysis of the event. For certain events, like fork,
+   * additional information is provided, like the rate at which the system forks processes.
+   * <p>
+   * This is the output you should post in the Redis mailing list if you are looking for help about
+   * Latency related issues.
+   *
+   * @return the report
+   */
+  String latencyDoctor();
 }
